@@ -158,10 +158,10 @@
     color:#fff;
   }
 
-  /* Recommend-mode octave row: C2 C3 C4 C5 + the FL toggle on the right */
+  /* Recommend-mode octave row: C1 C2 C3 C4 C5 + the FL toggle on the right */
   .octave-grid.with-fl{
-    grid-template-columns:repeat(4, 1fr) auto;
-    max-width:520px;
+    grid-template-columns:repeat(5, 1fr) auto;
+    max-width:580px;
   }
   .fl-btn{
     font-family:var(--font-ui);
@@ -188,8 +188,10 @@
       0 0 10px 2px rgba(80,160,255,0.75),
       0 0 24px 4px rgba(80,160,255,0.40);
   }
-  @media(max-width:420px){
-    .octave-grid.with-fl .octave-btn{font-size:12px; padding:9px 3px;}
+  /* on narrow screens the row shows just "C1 C2 …" so all six buttons fit on one line */
+  @media(max-width:480px){
+    .octave-grid.with-fl .octave-btn{padding:9px 2px;}
+    .octave-grid.with-fl .oct-suffix{display:none;}
     .fl-btn{padding:9px 11px;}
   }
 
@@ -268,6 +270,17 @@
     border-color:var(--brass);
     color:#241a10;
     transform:scale(0.96);
+  }
+  /* the chord currently selected: lit up blue, like an LED */
+  .rec-chip.chord-selected{
+    background:linear-gradient(180deg, #2d6bb8, #174a8a);
+    border-color:#8fc2ff;
+    color:#f2f8ff;
+    text-shadow:0 0 8px rgba(160,210,255,0.95);
+    box-shadow:
+      0 0 0 1px rgba(143,194,255,0.55) inset,
+      0 0 10px 2px rgba(80,160,255,0.75),
+      0 0 24px 4px rgba(80,160,255,0.40);
   }
   .chip{
     font-family:var(--font-ui);
@@ -883,6 +896,18 @@
     if(masterGain){ masterGain.gain.value = volumeValue; }
   }
 
+  // Low notes need help. Laptop/phone speakers barely reproduce anything below ~150 Hz, and
+  // the ear is far less sensitive down there, so a plain triangle wave at C1–B2 (33–123 Hz)
+  // is almost inaudible even though it is "loud" digitally. The pitch is left untouched; instead:
+  //   • a brighter sawtooth layer is added — its overtones sit where speakers and ears work well,
+  //     and the ear still hears the same low pitch from them (the "missing fundamental" effect);
+  //   • the fundamental gets a modest lift, for systems that do have bass.
+  // lowNoteWeight: 0 = untouched (C4 and above) … 1 = full effect (about C#2 and below).
+  // It depends only on the pitch, so a note sounds the same in every mode and with FL on or off.
+  function lowNoteWeight(midi){
+    return Math.min(1, Math.max(0, (60 - midi) / 26));
+  }
+
   // Short, dry, percussive note: quick pluck straight down to silence with
   // no sustained plateau, so nothing lingers or "rings" after it's struck.
   function playNote(midi, offset, duration, gainScale){
@@ -890,18 +915,29 @@
     const ctx = ensureAudio();
     const t0 = ctx.currentTime + offset;
     const freq = midiToFreq(midi);
+    const peak = 0.5*gainScale;
+    const w = lowNoteWeight(midi);
 
-    const osc = ctx.createOscillator(); osc.type = 'triangle'; osc.frequency.value = freq;
-    const filter = ctx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = 2600;
-    const g = ctx.createGain();
+    // one oscillator -> low-pass -> pluck envelope -> master
+    function layer(type, cutoff, level){
+      const osc = ctx.createOscillator(); osc.type = type; osc.frequency.value = freq;
+      const filter = ctx.createBiquadFilter(); filter.type = 'lowpass'; filter.frequency.value = cutoff;
+      const g = ctx.createGain();
 
-    g.gain.setValueAtTime(0, t0);
-    g.gain.linearRampToValueAtTime(0.5*gainScale, t0+0.005);
-    g.gain.linearRampToValueAtTime(0, t0+duration);
+      g.gain.setValueAtTime(0, t0);
+      g.gain.linearRampToValueAtTime(level, t0+0.005);
+      g.gain.linearRampToValueAtTime(0, t0+duration);
 
-    osc.connect(filter).connect(g).connect(masterGain);
-    osc.start(t0);
-    osc.stop(t0+duration+0.02);
+      osc.connect(filter).connect(g).connect(masterGain);
+      osc.start(t0);
+      osc.stop(t0+duration+0.02);
+    }
+
+    layer('triangle', 2600, peak * (1 + 0.4*w));
+    if(w > 0.001){
+      // cutoff follows the pitch: enough harmonics to be heard, not so many that it buzzes
+      layer('sawtooth', Math.min(2000, Math.max(500, freq*10)), peak * 0.8 * w);
+    }
   }
 
   function playChord(midiArray){
@@ -983,6 +1019,7 @@
   const selectedDetectMidis = new Set();
   let selectedRecommendMidi = null;
   let chordHighlightMidis = []; // notes of the recommended chord currently shown in blue
+  let selectedRecChordKey = null; // which recommended chord is currently selected (its chip glows blue)
   let recView = 'launchpad'; // 'piano' | 'launchpad' (recommend mode only; Launchpad is the default)
   let includeAnchorNote = true; // when true, playing a recommended chord also plays the anchor note (default ON)
   let flMode = true; // 'FL': pad LABELS read C3–D#8 instead of C1–D#6. Labels only — the sound never changes. Default ON.
@@ -1010,6 +1047,7 @@
   function selectRecommendAnchor(midi){
     selectedRecommendMidi = midi;
     chordHighlightMidis = [];
+    selectedRecChordKey = null;
     paintRecommendState();
     playNote(midi, 0, 0.32, 0.9);
     const pc = ((midi%12)+12)%12;
@@ -1070,13 +1108,17 @@
   // octave 5 with the widest chord in the dictionary (13th, +21 semitones
   // above the root), notes stay within the piano's C2–C8 range.
   const OCTAVE_OPTIONS = [2, 3, 4, 5];
+  // The recommend mode additionally offers C1 (chords sounding in the lowest octave,
+  // which matches the Launchpad's bottom-left C1 pad).
+  const REC_OCTAVE_OPTIONS = [1, 2, 3, 4, 5];
 
-  function buildOctaveGrid(containerId, getCurrent, onSelect){
+  function buildOctaveGrid(containerId, getCurrent, onSelect, options){
     const el = document.getElementById(containerId);
-    OCTAVE_OPTIONS.forEach(oct=>{
+    (options || OCTAVE_OPTIONS).forEach(oct=>{
       const btn = document.createElement('button');
       btn.className = 'octave-btn';
-      btn.textContent = 'C' + oct + ' 기준';
+      // " 기준" is hidden by CSS on narrow screens in the recommend row (textContent still reads "C1 기준")
+      btn.innerHTML = 'C' + oct + '<span class="oct-suffix"> 기준</span>';
       btn.dataset.active = (oct === getCurrent()) ? 'true' : 'false';
       btn.addEventListener('click', ()=>{
         Array.from(el.querySelectorAll('.octave-btn')).forEach(c=> c.dataset.active='false');
@@ -1094,7 +1136,7 @@
 
   buildOctaveGrid('octave-grid-rec', ()=> currentRecOctave, (oct)=>{
     currentRecOctave = oct;
-  });
+  }, REC_OCTAVE_OPTIONS);
 
   // "FL" toggle: sits to the right of the octave buttons and is independent of
   // them (both can be on at once). On = Launchpad scale runs C3 … D#8.
@@ -1329,6 +1371,7 @@
     const btn = document.createElement('button');
     btn.className = 'rec-chip';
     btn.textContent = chordDisplayName(entry.root, entry.formula, entry.roman);
+    btn.dataset.chordKey = chordKeyOf(entry);
     btn.addEventListener('click', ()=>{
       ensureAudio();
       const rootMidi = (currentRecOctave+1)*12 + entry.root;
@@ -1351,10 +1394,24 @@
       // modes. (The anchor note keeps its own burgundy "selected" mark even
       // when it's also being played along with the chord.)
       chordHighlightMidis = notes.slice();
+      selectedRecChordKey = chordKeyOf(entry);
+      paintRecChips();
       paintRecommendState();
-      if(recView === 'piano') scrollPianoToMidi(rootMidi);
+      if(recView === 'piano') scrollPianoToMidi(shiftGroupInto(notes, MIDI_START, MIDI_END)[0]);
     });
     return btn;
+  }
+
+  // The same chord can appear in more than one group (e.g. Am under "contains C" and
+  // as "vi"), so the selection is tracked by chord identity and every matching chip lights up.
+  function chordKeyOf(entry){ return entry.root + ':' + entry.formula.id; }
+
+  function paintRecChips(){
+    recResultsEl.querySelectorAll('.rec-chip').forEach(chip=>{
+      const on = (selectedRecChordKey !== null && chip.dataset.chordKey === selectedRecChordKey);
+      chip.classList.toggle('chord-selected', on);
+      chip.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
   }
 
   function renderRecommendations(pc){
@@ -1384,6 +1441,7 @@
   }
 
   function hideRecommendResults(){
+    selectedRecChordKey = null;
     recPlaceholderEl.hidden = false;
     recResultsEl.hidden = true;
     recRootListEl.innerHTML = '';
@@ -1482,6 +1540,17 @@
     return m;
   }
 
+  // For the piano (C2–C8): move a whole chord up/down by octaves until it fits, so a
+  // C1-octave chord appears as the same chord shape one octave higher instead of being scrambled.
+  function shiftGroupInto(list, lo, hi){
+    if(!list.length) return [];
+    let shift = 0;
+    const mn = Math.min.apply(null, list), mx = Math.max.apply(null, list);
+    while(mn + shift < lo) shift += 12;
+    while(mx + shift > hi && mn + shift - 12 >= lo) shift -= 12;
+    return list.map(m=> m + shift);
+  }
+
   function paintLaunchpad(){
     let folded = false;
     const lo = PAD_BASE_MIDI, hi = PAD_MAX_MIDI;
@@ -1513,8 +1582,8 @@
       const el = keyElsByMidi[foldInto(selectedRecommendMidi, MIDI_START, MIDI_END)];
       if(el) el.classList.add('selected');
     }
-    chordHighlightMidis.forEach(m=>{
-      const el = keyElsByMidi[foldInto(m, MIDI_START, MIDI_END)];
+    shiftGroupInto(chordHighlightMidis, MIDI_START, MIDI_END).forEach(m=>{
+      const el = keyElsByMidi[m];
       if(el) el.classList.add('chord-highlight');
     });
     paintLaunchpad();
@@ -1526,8 +1595,8 @@
     launchpadWrapEl.hidden = !showPad;
     if(mode === 'recommend' && !showPad){
       // showing the piano: bring the relevant keys into view (middle C if nothing is selected yet)
-      const target = chordHighlightMidis.length ? chordHighlightMidis[0]
-                   : (selectedRecommendMidi != null ? selectedRecommendMidi : 60);
+      const target = chordHighlightMidis.length ? shiftGroupInto(chordHighlightMidis, MIDI_START, MIDI_END)[0]
+                   : (selectedRecommendMidi != null ? foldInto(selectedRecommendMidi, MIDI_START, MIDI_END) : 60);
       scrollPianoToMidi(target);
       pianoCentered = true;
     } else if(!showPad && !pianoCentered){
