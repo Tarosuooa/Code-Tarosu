@@ -746,7 +746,7 @@
     </div>
 
     <h2>재생 옥타브 기준</h2>
-    <p class="sub-label">추천 화음을 재생할 때 사용할 기준 옥타브예요 · FL을 켜면 런치패드 음계가 C1~D#6 대신 C3~D#8이 돼요 (옥타브와 함께 선택할 수 있어요)</p>
+    <p class="sub-label">추천 화음을 재생할 때 사용할 기준 옥타브예요 · FL을 켜면 런치패드 버튼에 적힌 음계가 C1~D#6 대신 C3~D#8로 표시돼요 (이름만 바뀌고 소리는 그대로예요 · 옥타브와 함께 선택할 수 있어요)</p>
     <div class="octave-grid" id="octave-grid-rec"></div>
 
     <h2>선택한 음 함께 재생</h2>
@@ -985,7 +985,7 @@
   let chordHighlightMidis = []; // notes of the recommended chord currently shown in blue
   let recView = 'launchpad'; // 'piano' | 'launchpad' (recommend mode only; Launchpad is the default)
   let includeAnchorNote = true; // when true, playing a recommended chord also plays the anchor note (default ON)
-  let flMode = true; // 'FL': the Launchpad scale starts at C3 (C3–D#8) instead of C1 (C1–D#6). Default ON.
+  let flMode = true; // 'FL': pad LABELS read C3–D#8 instead of C1–D#6. Labels only — the sound never changes. Default ON.
 
   function handleKeyClick(midi, el){
     if(mode === 'play'){
@@ -1104,7 +1104,7 @@
   flBtn.type = 'button';
   flBtn.className = 'fl-btn';
   flBtn.textContent = 'FL';
-  flBtn.title = 'FL: 런치패드 음계를 C3부터 시작 (C3–D#8)';
+  flBtn.title = 'FL: 런치패드 버튼에 적힌 음계를 C3~D#8로 표시 (소리는 그대로)';
   function syncFlBtn(){
     flBtn.dataset.active = flMode ? 'true' : 'false';
     flBtn.setAttribute('aria-pressed', flMode ? 'true' : 'false');
@@ -1420,11 +1420,16 @@
   // Layout transcribed from the reference image ("user1 Mode Scale"):
   // two 4-column halves, each reading chromatically bottom-to-top, 4 notes per row.
   // The right half simply continues where the left half's top row ends.
-  //   FL off : C1 (bottom-left) ... D#6 (top-right)
-  //   FL on  : C3 (bottom-left) ... D#8 (top-right)   <- the whole scale moves up 2 octaves
-  // Labels use the same octave naming as the piano (C4 = middle C = MIDI 60),
-  // and a pad sounds exactly the pitch its label names.
+  // Each pad has ONE fixed pitch: the bottom-left pad is C1 (MIDI 24) ... the top-right is
+  // D#6 (MIDI 87). That never changes, so sound and highlighted pads are the same whether
+  // FL is on or off.
+  // FL only changes the NAME written on each button, shifted up 2 octaves:
+  //   FL off : labels C1 (bottom-left) ... D#6 (top-right)
+  //   FL on  : labels C3 (bottom-left) ... D#8 (top-right)
+  // (Labels otherwise use the piano's octave naming: C4 = middle C = MIDI 60.)
   const PAD_COUNT = 64;
+  const PAD_BASE_MIDI = 24;                       // C1 — the bottom-left pad
+  const PAD_MAX_MIDI = PAD_BASE_MIDI + PAD_COUNT - 1; // D#6
   const padGridEl = document.getElementById('lp-grid');
   const launchpadWrapEl = document.getElementById('launchpad-wrap');
   const lpNoteEl = document.getElementById('lp-note');
@@ -1433,9 +1438,8 @@
   const padElsByMidi = {};
   const padList = []; // { el, offset } — offset = semitones above the bottom-left pad
 
-  function padBaseMidi(){ return flMode ? 48 : 24; }            // C3 or C1
-  function padMinMidi(){ return padBaseMidi(); }
-  function padMaxMidi(){ return padBaseMidi() + PAD_COUNT - 1; } // D#8 or D#6
+  function padLabelShift(){ return flMode ? 24 : 0; }          // FL: labels read 2 octaves higher
+  function padLabel(midi){ return noteLabel(midi + padLabelShift()); }
 
   function buildLaunchpad(){
     const frag = document.createDocumentFragment();
@@ -1456,19 +1460,18 @@
     relabelLaunchpad();
   }
 
-  // (Re)assigns every pad's note — called at start-up and whenever FL is toggled.
+  // (Re)writes the text on every pad — called at start-up and whenever FL is toggled.
+  // Only the label depends on FL; the pad's pitch (dataset.midi) is fixed.
   function relabelLaunchpad(){
-    const base = padBaseMidi();
-    Object.keys(padElsByMidi).forEach(k=> delete padElsByMidi[k]);
     padList.forEach(p=>{
-      const midi = base + p.offset;
+      const midi = PAD_BASE_MIDI + p.offset;
       p.el.dataset.midi = midi;
-      p.el.textContent = noteLabel(midi);
+      p.el.textContent = padLabel(midi);
       p.el.classList.toggle('sharp', [1,3,6,8,10].indexOf(midi % 12) !== -1);
       padElsByMidi[midi] = p.el;
     });
-    lpRangeStartEl.textContent = noteLabel(padMinMidi());
-    lpRangeEndEl.textContent = noteLabel(padMaxMidi());
+    lpRangeStartEl.textContent = padLabel(PAD_BASE_MIDI);
+    lpRangeEndEl.textContent = padLabel(PAD_MAX_MIDI);
   }
 
   // A note outside an instrument's range is shown on the same pitch class in the
@@ -1481,7 +1484,7 @@
 
   function paintLaunchpad(){
     let folded = false;
-    const lo = padMinMidi(), hi = padMaxMidi();
+    const lo = PAD_BASE_MIDI, hi = PAD_MAX_MIDI;
     Object.keys(padElsByMidi).forEach(k=>{
       padElsByMidi[k].classList.remove('selected', 'chord-highlight');
     });
@@ -1497,7 +1500,7 @@
     });
     lpNoteEl.hidden = !folded;
     lpNoteEl.textContent = folded
-      ? '런치패드 범위(' + noteLabel(lo) + '–' + noteLabel(hi) + ')를 벗어난 음은 같은 음의 가까운 옥타브 패드로 표시했어요'
+      ? '런치패드 범위(' + padLabel(lo) + '–' + padLabel(hi) + ')를 벗어난 음은 같은 음의 가까운 옥타브 패드로 표시했어요'
       : '';
   }
 
